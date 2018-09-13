@@ -1,0 +1,89 @@
+---
+title: "Impact of Yield Curves on Equity Sectors"
+output: 
+  flexdashboard::flex_dashboard:
+    runtime: shiny
+  pdf_document: 
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(tidyquant))
+```
+
+```{r get_data, include=FALSE, cache=TRUE}
+source("preprocessing.R")
+```
+
+Introduction and Motivation
+===========================================
+
+For over 30 years, long-run interest rates have been on a slow, steady decline. Now, possibly, they have finally turned a corner. The implications for the American economy are substantial. Whole sectors of the economy have flourished only in a declining rate environment, and there is no empirical evidence of how they will function when long-run rates rise. It has become the received wisdom that asset classes which typically perform well when rates are declining, such as houses, are a safe and low-risk investment, even after the 2008 financial crisis.
+
+The first place to look for the impending sea-change in the rate environment is the yield curve, which shows the current state of market expectations for interest rates over different time periods. Shifts in the yield curve have the most direct impact on the US economy by changing the cost and character of corporate financing.
+
+As different industries rely on a different financing mix, and corporate bond issuance is hardly the only mechanism by which the yield curve can impact US corporations, we will investigate the relationship between changes in the yield curve and different corporate sectors, as defined by Kenneth French of Fama/French Factor Model fame.
+
+We hope to provide a resource to aid in decision-making for portfolio managers, as well as for scenario analyis for corporate decision-makers. 
+
+First, we should examine the raw data.
+
+Yield Curve
+======================================================================
+
+We will characterize the yield curve using nominal, constant maturity bond rate data provided by the (St. Louis Fed)[https://fred.stlouisfed.org/].
+
+It is typical to look at only one or two spreads between time periods to describe the yield curve, with 10Y-2Y spreads being perhaps the most popular. However, the true yield curve is more complex than that.
+
+```{r yc_s}
+yc %>%#this is faster than moving from long-to-wide, subtracting the column, then moving back
+  group_by(duration) %>%
+  arrange(date) %>%
+  fill() %>%
+  ungroup() %>%
+  left_join(yc %>%  
+              filter(duration==1) %>%
+              transmute(date=date,`1`=value),
+            by="date") %>%
+  mutate(value=value-`1`) %>%
+  select(-`1`) %>%
+  mutate(duration=ceiling(12*as.numeric(duration))) %>%
+  ggplot(aes(x=duration, y=value, group=date)) + 
+  geom_line(alpha=0.01) + 
+  coord_trans(x="log") +
+  scale_x_continuous(breaks=unique(ceiling(12*yc$duration)))+
+  scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+  xlab("Months") + ylab("Interest Rate") + theme_light() +
+  ggtitle("57 Years of Yield Curves (Spread from 1Y)")
+```
+
+We can see that it is highly unusual for the long end of the yield curve to be inverted. It is *not* unusual for the short end of the curve to contain "kinks", in which the 3 or 6 month rates are higher than the 1, 2, or even 5 year rates, before the time-value of money supercedes expectations of future conditions.
+
+We propose to characterize the Yield Curve in any given period as sequence of three spreads. We could use an overall polynomial fit to admit early kinks inside a generally positive-sloping curve, but the coefficients of that fit would not be directly interpretable.  
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Chart A
+
+```{r}
+
+```
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Chart B
+
+```{r}
+
+```
+
+### Chart C
+
+```{r}
+
+```
+
