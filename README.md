@@ -11,7 +11,7 @@ The hierarchical regression had to be limited to only 5 sectors as I lacked the 
 
 ## Notable Files
 
-  -* [preprocessing.R](https://github.com/CharlesNaylor/Yield_Curve_v_Equity_Sectors/blob/master/preprocessing.R) - contains the script to turn raw downloaded data into tidy format
-  - `.RData` - pre-calculated model fits. Some of the HMC-based models can take several hours to fit, and run into hundreds of megabytes due to the need to fit missing data. This saves the presentation from re-calculating that data each time it is run.
-  -*** [Impact of Yield Curves on Equity Sectors - Preprocessing and Modeling](https://github.com/CharlesNaylor/Yield_Curve_v_Equity_Sectors/blob/master/Impact_of_Yield_Curves_on_Equity_Sectors_-_Preprocessing_and_Modeling.pdf) - Where the work got done. The rendered pdf gives details of the models I fit and my reasoning behind them.
-  - [dashboard.Rmd](https://github.com/CharlesNaylor/Yield_Curve_v_Equity_Sectors/blob/master/dashboard.Rmd) - Code to render a live dashbord with which to examine the models.
+  * [preprocessing.R](https://github.com/CharlesNaylor/Yield_Curve_v_Equity_Sectors/blob/master/preprocessing.R) - contains the script to turn raw downloaded data into tidy format
+  * `.RData` - pre-calculated model fits. Some of the HMC-based models can take several hours to fit, and run into hundreds of megabytes due to the need to fit missing data. This saves the presentation from re-calculating that data each time it is run.
+  * [Impact of Yield Curves on Equity Sectors - Preprocessing and Modeling](https://github.com/CharlesNaylor/Yield_Curve_v_Equity_Sectors/blob/master/Impact_of_Yield_Curves_on_Equity_Sectors_-_Preprocessing_and_Modeling.pdf) - Where the work got done. The rendered pdf gives details of the models I fit and my reasoning behind them.
+  * [dashboard.Rmd](https://github.com/CharlesNaylor/Yield_Curve_v_Equity_Sectors/blob/master/dashboard.Rmd) - Code to render a live dashbord with which to examine the models.
