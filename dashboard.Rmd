@@ -3,18 +3,19 @@ title: "Impact of Yield Curves on Equity Sectors"
 output: 
   flexdashboard::flex_dashboard:
     runtime: shiny
-  pdf_document: 
-    toc: yes
 ---
 
 ```{r setup, include=FALSE}
 library(flexdashboard)
+library(plotly)
 suppressPackageStartupMessages(library(tidyverse))
-suppressPackageStartupMessages(library(tidyquant))
+library(bayesplot)
+library(rstan)
 ```
 
 ```{r get_data, include=FALSE, cache=TRUE}
 source("preprocessing.R")
+load(".RData")
 ```
 
 Introduction and Motivation
@@ -28,14 +29,15 @@ As different industries rely on a different financing mix, and corporate bond is
 
 We hope to provide a resource to aid in decision-making for portfolio managers, as well as for scenario analyis for corporate decision-makers. 
 
-First, we should examine the raw data.
+The full source code of this project is available online at [github](https://github.com/CharlesNaylor/Yield_Curve_v_Equity_Sectors).
 
-Yield Curve
-======================================================================
+First, some background on how we are defining shifts in the yield curve, and equity sectors.
 
-We will characterize the yield curve using nominal, constant maturity bond rate data provided by the (St. Louis Fed)[https://fred.stlouisfed.org/].
+Yield Curve {.storyboard}
+===============================
 
-It is typical to look at only one or two spreads between time periods to describe the yield curve, with 10Y-2Y spreads being perhaps the most popular. However, the true yield curve is more complex than that.
+### Rate Data
+
 
 ```{r yc_s}
 yc %>%#this is faster than moving from long-to-wide, subtracting the column, then moving back
@@ -59,34 +61,423 @@ yc %>%#this is faster than moving from long-to-wide, subtracting the column, the
   ggtitle("57 Years of Yield Curves (Spread from 1Y)")
 ```
 
+*** 
+
+We will use nominal, constant maturity bond rate data provided by the (St. Louis Fed)[https://fred.stlouisfed.org/].
+
+It is typical to look at only one or two spreads between time periods to describe the yield curve, with 10Y-2Y spreads being perhaps the most popular. However, the true yield curve is more complex than that.
+
 We can see that it is highly unusual for the long end of the yield curve to be inverted. It is *not* unusual for the short end of the curve to contain "kinks", in which the 3 or 6 month rates are higher than the 1, 2, or even 5 year rates, before the time-value of money supercedes expectations of future conditions.
 
-We propose to characterize the Yield Curve in any given period as sequence of three spreads. We could use an overall polynomial fit to admit early kinks inside a generally positive-sloping curve, but the coefficients of that fit would not be directly interpretable.  
+### Characterizing the Yield Curve
 
-Column {data-width=650}
------------------------------------------------------------------------
-
-### Chart A
-
-```{r}
-
+```{r yc}
+yc %>%
+  group_by(date) %>%
+  mutate(value=value-mean(value, na.rm=T)) %>%
+  ungroup() %>%
+  mutate(duration=ceiling(12*duration)) %>%
+  spread(duration, value) %>% 
+  transmute(date=date,
+         min=`6` - mean(c(`1`,`3`), na.rm=T),
+         early=`12` - `3`,
+         mid=`60`-`12`,
+         late=mean(c(`120`,`240`,`360`), na.rm=T)-`24`) %>%
+  gather(duration, value, -date) %>%
+  mutate(duration=fct_relevel(duration, c("min","early","mid","late"))) %>%
+  drop_na() ->
+  yc_spreads
+renderPlotly({
+  yc_spreads %>%
+    ggplot(aes(x=date, y=value, col=duration)) +
+    geom_hline(yintercept = 0, col="darkgrey") +
+    geom_line(alpha=0.65) + 
+    scale_color_brewer(palette="Dark2") +
+    xlab("") + ylab("") +
+    ggtitle("Yield Spreads Factors")
+})
 ```
 
-Column {data-width=350}
------------------------------------------------------------------------
+*** 
 
-### Chart B
+We propose to characterize the Yield Curve in any given period as sequence of four spreads:
 
-```{r}
+* Min: 6 months minus the average of 1M and 3M
+* Early: 12M minus 3M
+* Mid: 5Y - 1Y
+* Late: average of 10Y, 20Y, and 30Y minus 2Y
 
+We could fit a cubic spline model to admit early kinks inside a generally positive-sloping curve, but the coefficients of that fit would not be directly interpretable. By choosing several spreads, we will need to account for collinearity in any predictive regressions.
+
+The first date for which all of these spreads are available is 1982-01-04. We don't want to jettison the late 70's oil crisis, however, as that period represents a substantial portfolio of our body of mid-range negative interest rates. 
+
+As we want to fit the impact of *changes* in the yield spread against equity prices, we will need to take the difference of the above factors. We'll also take the opportunity to scale at this point, as the MCMC models we'll be fitting later do better when the standard deviation is close to 1. We can multiply by 10,000 and refer to rate movements in terms of basis points.
+
+### Collinearity in Yield Spread Changes
+
+```{r diff_yc}
+library(GGally)
+yc_spreads %>%
+  group_by(duration) %>%
+  arrange(date) %>%
+  mutate(value=c(NA,diff(value)*1e4)) %>% #multiplying by 10000 because the values are getting kind of small
+  ungroup() ->
+  yc_spread_diff
+
+yc_spread_diff %>%
+  spread(duration, value) %>%
+  select(-date) %>%
+  ggcorr(label=T) + 
+  ggtitle("Collinearity in differences of yield curve spreads")
 ```
 
-### Chart C
+***
 
-```{r}
+The highly negative correlation between changes in spreads in the half-year end ("min") and the 5Y - 2Y ("mid") 
 
+Daily changes in these yield curve indexes are leptokurtic, as befits a time series indirectly set by committee, but surprisingly centered at 0. We would have expected a negative median given the last 30 years.
+
+```{r yc_spread_diff_dist}
+yc_spread_diff %>%
+  group_by(duration) %>%
+  drop_na() %>%
+  summarize(min=min(value),
+            `0.05`=quantile(value, 0.05),
+            `0.10`=quantile(value, 0.10),
+            `0.32`=quantile(value, 0.32),
+            `0.5`=quantile(value, 0.5),
+            `0.67`=quantile(value, 0.67),
+            `0.90`=quantile(value, 0.9),
+            `0.95`=quantile(value, 0.95),
+            kurtosis=kurtosis(value),
+            sd=sd(value)
+            ) %>%
+  knitr::kable(digits=2)
 ```
 
-# TODO
 
-How about "draw the yield curve and see E(R) for different sectors"?
+Equity Sectors {.storyboard}
+===========================================
+
+### Cumulative Returns
+
+```{r}
+sector_returns %>%
+  group_by(sector) %>%
+  arrange(Date) %>%
+  replace_na(list(avg_return=0)) %>%
+  mutate(cum_return=cumprod(1+avg_return)) %>%
+  ungroup() ->
+  cum_sr
+
+renderPlotly({
+  cum_sr %>%
+    ggplot(aes(x=Date,y=cum_return, group=sector)) +
+    geom_line(alpha=0.2) + 
+    coord_trans(y="log") +
+    scale_y_continuous(breaks=c(0,1,1e2,1e4,1e6,1e8)) +
+    theme_light() +
+    ggtitle("Cumulative Performance by Sector (log scale)") + xlab("") + ylab("")
+})
+```
+
+*** 
+
+Kenneth French has undertaken the Herculean task of assembling economic sector return indexes for US stocks, with data going back to before the Great Depression. We have 49 sectors, which may become unwieldy in the final model. We can use Bayesian shrinkage via multilevel modeling to mitigate the prevalence of Type I errors that would arise from fitting separate regressions for each sector.
+
+Here we see the cumulative returns of the sectors, starting from 1962, where our Yield Curve data starts. A rising tide lifts all boats, but the long-term view emphasizes the importance of starting points. The worst performer for nearly the entire history shown is Software. We started the cumulative series shortly before the late 60's tech bubble collapsed, and an investment of $1 took until the mid-90's to recover. You can hover over the lines to see to what sector each refers.
+
+### Sector Similarities
+
+```{r sector_pca}
+sector_returns %>%
+  spread(sector, avg_return) %>%
+  drop_na() %>% # we need a contiguous dataset to perform PCA.
+  select(-Date) %>% 
+  prcomp() %>%
+  broom::tidy(matrix="v") %>% 
+  filter(PC<3) %>%
+  spread(PC, value) %>%
+  ggplot(aes(x=`1`, y=`2`)) + 
+  geom_text(aes(label=column), angle=45, size=3) + 
+  ggtitle("Sector Clustering")
+```
+
+***
+
+Here we cluster sector returns using principal component analysis. It looks like the first principal component is approximately dividing cyclical from non-cyclical sectors, while the second might be picking out heavy industry, i.e. mining, commodities, agriculture, and construction, versus services and manufacturing higher up the value chain.
+
+Modeling {.storyboard}
+=======================================
+
+### Simple Regression per-Sector
+
+```{r sector_ols, fig.width=16.1, fig.height=8}
+renderPlotly({
+  fit_lm %>%
+    arrange(sector) %>% # Tufte would say I should sort by some value, but I think in this case it's more relevant to be able to see which sector it is easily. I'll sort by value for the interactive version.
+    mutate(significant=p.value<0.05) %>%
+    ggplot(aes(x=estimate, y=sector, col=significant)) + 
+    facet_grid(~term) +
+    geom_vline(aes(xintercept=0), col="darkgrey") +
+    geom_errorbarh(aes(xmin=conf.low, xmax=conf.high)) +
+    geom_point() +
+    guides(col=guide_legend(title="Significance")) +
+    scale_color_manual(values=c("TRUE"="black", "FALSE"="lightgrey")) +
+    ggtitle("Regression Coefficients")
+})
+```
+
+***
+
+In a world with an efficient market, we might expect equity prices to reflect changes in the yield curve immediately, even though the impact of changes in rates on the cost of capital, or some other relevant effect might be expected to take longer to actually hit the firms' bottom lines. Hence we are comfortable regressing the contemporaneous change in the yield curve against the returns.
+
+Here, we look at a basic multivariate regression on each sector independently. To keep things simple, we will only look at the contiguous data set, which starts in 1982.
+
+While the intercept looks significant, the other coefficients include a difference of 2 orders of magnitude between the change in yield curve and the equity returns, so it is actually basically zero. The very short end of the curve seems to be insignificant. Therefore, we can drop these two from later models without losing much information.
+
+We can see confirmation of the Principal Components Analysis that placed gold miners as an extreme outlier; Gold alone benefits from positive changes in the long end of the yield curve, possibly because these signify inflation. It's also worth noting that the average day for all of these sectors has been positive. 
+
+### Quantile Regression
+
+```{r graph_rq}
+renderPlotly({
+fit_rq %>%
+  ggplot(aes(x=tau, y=estimate, group=sector)) +
+  facet_wrap(~term, scale="free_y") +
+  geom_line(alpha=0.2) +
+  ggtitle("Sector Coefficients by Yield Change Quantile")
+})
+```
+
+***
+
+There is no *a priori* reason we should expect the sensitivity of equities to changes in the yield curve to follow a linear relationship. Larger moves, especially rises (and hence drops on the short end) may be driven by macroeconomic shocks, although typically the equity markets will incorporate this information faster than the Fed can react to it.
+
+We can see a clear sensitivity of tail values for the mid-level (5Y - 1Y) changes in the yield curve, at least for some sectors. Coefficients in this model are swamped by the intercept, which is two orders of magnitude more important than the effects we're measuring. On a typical day, we do not expect that yield curve changes will be the primary drivers of equity returns, so perhaps this is not surprising.
+
+### Missing Data
+
+```{r check_yc_t_fit}
+t_params <- get_posterior_mean(yc_t_fit)[,"mean-all chains"]
+plot(yc_t_fit) + ggtitle("Missing Data Student's T Parameters")
+```
+
+***
+
+We have much more data for the mid curve factor than for the others. It would be a pity to throw that away, especially since the early period, from the 1960s through 1982, contains inflation due to the oil price shock, and Volker's subsequent massive rate hikes to contain it. We can still have the mid curve factor data in our multivariate regression if we account for the missing data with a generative model.  There are two options: either we draw the missing factor data from a distribution approximating the full extant data, or we fit a preliminary model regressing unknown portions of the yield curve against what data we do have, and fill missing periods on the basis of that fit. In the first case, we will have made the incorrect assumption that the yield curve changes are i.i.d with respect to time, and in the second, unless we are careful to account for the leptokurtic structure of the yield curve differentials, we will have imposed normality on the missing distributions. It's debateable, but the first option is probably more conservative.
+
+We will assume the missing data can be described as draws from a Student's T distribution, as we know the changes have fat tails. The chart shows the distribution of estimates on the Student's T parameters.
+
+### Partial Pooling
+
+```{r graph_hier_b}
+dimnames(lme_pars$beta) <- list(iteration=NULL, 
+                                sector=c("Banks", "Gold", "Hlth", "Softw", "Util"),
+                                yield_curve=c("early", "mid", "late"))
+
+as.tibble(lme_pars$beta) %>%
+  gather(x, value) %>%
+  separate(x, c("sector", "term")) %>%
+  left_join(fit_lm %>% select(sector, term, estimate), by=c("sector", "term")) %>%
+  ggplot(aes(y=value*100, x=sector)) + #recall we scaled terms for the OLS fit
+  facet_wrap(~term) + 
+  geom_hline(yintercept=0, col="darkgrey") +
+  geom_violin() +
+  geom_point(aes(y=estimate), col="red") +
+  ggtitle("Distribution of Coefficients of yield_curve by Equity Sector",
+          subtitle = "Unpooled OLS coefficient in red")
+```
+
+***
+
+Unfortunately, fitting a model on all sectors using partial pooling is a little beyond the resources available for this project. We instead fit a generative model, with the missing data estimates from before, on a subset of 5 sectors. This still took 12 hours to simulate on a laptop.
+
+The sectors we chose were:
+
+* Software
+* Gold
+* Banks
+* Utilities
+* Healthcare
+
+In the partial pooling model, equity sector returns are estimated using local coefficients, which are estimated in turn as draws from a multivariate normal distribution:
+
+$$
+\hat{y_{i,j}} \sim N(x_i\beta_j, \sigma) \\
+\beta \sim MN(0, \tau'\Omega\tau) \\
+\sigma \sim N(0, 5); \sigma > 0 
+$$
+
+We can see from the results that the hierarchical coefficients were sometimes stronger than what we saw in the OLS regression. Typically, one expects partial pooling to bring the average in, a phenomenon known as Bayesian Shrinkage. In this case, we fit the more complicated model without an explicit intercept, expecting the $\sigma$ to account for untracked effects in Y, so it is not as unusual that we see larger betas.
+
+Best Sectors for Different Environments
+=======================================
+
+Where to put our money? {.sidebar data-width=300}
+-------------------------------------------------------
+
+Using the sliders below, you can select whatever **change** in the yield curve you believe may be likely. Using the quantile regression data, we provide the optimal portfolio for that scenario. All these changes are in **basis points**.
+
+```{r sliders}
+sliderInput("early", "Early (6M - mean(1M,3M))", min=-75, max=75, value=0, step=1)
+sliderInput("mid", "Mid (5Y-1Y)", min=-75, max=75, value=0, step=1)
+sliderInput("late", "Late (mean(10Y, 20Y, 30Y) - 2Y)", min=-75, max=75, value=0, step=1)
+sliderInput("tau", "Y percentile", min=0.05, max=0.95, value=0.5, step=0.05)
+```
+
+Portfolio
+-------------------------------
+
+```{r}
+library(quadprog)
+
+#' Efficient Frontier
+#'
+#' A wrapper for solve.QP that assumes you already have a covariance matrix and expected return, and runs along possible
+#' target risks to calculate the maximum return at each level.
+#'
+#' @param met_cov: var-covar matrix. We expect the dimensions to be named.
+#' @param met_mean: numeric vector of expected returns of assets
+#' @param short: boolean. Do we permit shorts?
+#' @param Rf: Risk-free rate 
+#' @param max.allocation: maximum *per-asset* allocation
+#' @param max_risk: maximum risk to target on efficient frontier 
+#'
+#' @details: cf. https://za.nexteinstein.org/wp-content/uploads/sites/6/2017/01/ORIG_Portfolio-Optimization-Using-R_Pseudo-Code.pdf
+#'
+#' @return: a tibble containing return, actual sd, target sd, weights, and sharpe ratio for each target sd.
+#' @export
+#'
+#' @examples
+efficient_frontier <- function(met_cov, met_mean, short=F, Rf=0.028, max.allocation=NULL, max_risk=0.25) {
+  meq <- 1
+  J <- ncol(met_cov)
+  if(short) {
+    Amat <- matrix(1, nrow=J)
+    bvec <- 1
+  } else {
+    Amat <- cbind(1, diag(J))
+    bvec <- c(1, rep(0,J))
+  }
+  if(!is.null(max.allocation)) { #per-asset max allocation
+    stopifnot(max.allocation<=1 & max.allocation>=0) 
+    if(max.allocation*J < 1) {
+      stop("max alloc of ",max.allocation," times J of ",J," < 1")
+    }
+    # Add allocation constraints (portfolio must reach 100%)
+    Amat <- cbind(Amat, -diag(J))
+    bvec <- c(bvec, rep(-max.allocation,J))
+  }
+  #we will target sigma instead of mu, which is how I usually see this done.
+  target_sigma <- seq(0,max_risk, by=0.005)
+  #pre-allocate answer matrixes
+  N <- length(target_sigma)
+  sd <- vector("numeric", N)
+  mu_hat <- vector("numeric", N)
+  weights <- matrix(nrow=N, ncol=J, dimnames=list(seq.int(N), colnames(met_cov)))
+  for(i in seq_along(target_sigma)) {
+    tryCatch({
+      result <- solve.QP(Dmat = met_cov,
+                         dvec = met_mean * target_sigma[i],
+                         Amat = Amat, bvec=bvec, meq=meq)
+      sd[i] <- sqrt(crossprod(result$solution,met_cov %*% result$solution))
+      mu_hat[i] <- crossprod(result$solution, met_mean)
+      weights[i,] <- result$solution
+    }, error=function(e) {print(paste0("Failed on ",i,": ",e))})
+  }
+  bind_cols(mu=mu_hat, sigma=sd, target_sigma=target_sigma, as_tibble(weights)) %>%
+    mutate(sharpe=(mu-Rf)/sigma) ->
+    ef
+  return(ef)
+}
+
+#' Plot Efficient Frontier
+#'
+#' Generates a tangency plot from the output of \link{efficient_frontier}
+#'
+#' @param ef output of \link{efficient_frontier}
+#' @param Rf risk-free rate
+#'
+#' @return ggplot2 object
+#' @export
+#'
+#' @examples
+plot_ef <- function(ef, Rf=0.028) {
+  ef %>% 
+    gather(nm, wgt, -mu, -sigma, -target_sigma, -sharpe) %>%
+    filter(sharpe==max(sharpe)) %>%
+    group_by(nm) %>%
+    summarize(wgt=max(wgt)) %>%
+    ungroup() %>%
+    mutate(lbl=paste(nm, scales::percent(wgt))) %>%
+    pull(lbl) %>%
+    paste(collapse="\n") ->
+    lbls
+  y_lims <- range(pretty(c(Rf, ef$mu))) #make sure Rf gets in the plot
+  ef %>% 
+    ggplot(aes(x=sigma, y=mu)) + 
+    geom_line() + #frontier line
+    geom_point(aes(x=sigma[which.max(sharpe)], y=mu[which.max(sharpe)]), col="blue", size=2) + #Best portfolio
+    geom_abline(aes(intercept=Rf, slope=max(sharpe)), col="red") + # tangent line
+    geom_text(aes(x=sigma[which.max(sharpe)], y=mu[which.max(sharpe)]), label=lbls) +
+    scale_y_continuous(labels=scales::percent, limits=y_lims) + 
+    scale_x_continuous(labels=scales::percent, limits=c(0,NA)) +
+    ylab("Annlzd Return") + xlab("Annlzd Risk")
+}
+```
+
+```{r optim}
+sector_returns %>%
+  spread(sector, avg_return) %>%
+  drop_na() %>%
+  select(-Date) %>%
+  cov ->
+  sector_cov
+rownames(sector_cov) <- colnames(sector_cov) <- unique(sector_returns$sector) #my ef function wants the covar matrix to be named
+
+
+renderPlotly({
+# Get sector E(R) estimates
+exogs <- tribble(~term, ~exog,
+                 "(Intercept)", 1,
+                 "early", as.numeric(input$early),
+                 "mid", as.numeric(input$mid),
+                 "late", as.numeric(input$late))
+fit_rq %>%
+  filter(tau==as.numeric(input$tau)) %>%
+  left_join(exogs, by="term") %>%
+  mutate(effect=estimate*exog) %>%
+  group_by(sector) %>%
+  summarize(e_r=sum(effect)/10000) ->
+  e_r
+  
+ef <- efficient_frontier(sector_cov, pull(e_r, "e_r"), Rf=0)
+plot_ef(ef)
+
+ef[which.max(ef$sharpe),] %>% 
+  gather(sector,weight,-mu,-sigma,-target_sigma,-sharpe) %>%
+  mutate(weight=zapsmall(weight)) %>%
+  filter(weight>0) %>% #we did not permit shorts
+  arrange(desc(weight)) %>%
+  ggplot(aes(x=sector, y=weight)) + geom_point() +
+  ggtitle("Efficient Portfolio Weights")
+})
+```
+
+
+
+Conclusions
+=======================================
+
+We have seen that changes in the yield curve can have a direct, measurable effect on equity returns, even at the daily level. Further work should be done, firstly, to fit a full quantile regression with partial pooling on all of the data. The newest version of Stan, the probabilistic programming language with which we fit our partial pooling model, has implemented map-reduce, so with a sufficiently powerful machine it should now be possible to fit the model as laid out above, or even using the non-linear quantile fit, to all possible sectors. A hierarchical Gaussian Process regression would be another option given enough hardware.
+
+It would also be sensible to look at the impact of changes to equity returns over longer periods. Does the investment outlook change significantly if we are looking at weekly changes? What about monthly, or quarterly?
+
+
+
+## Citations
+
+1. Kenneth R. French - Data Library, http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html, Accessed 2018-09-10.
+2. Federal Reserve Economic Data, St. Louis Fed., https://fred.stlouisfed.org, Accessed 2018-09-10.
+3. Stan Modeling Language Users Guide and Reference Manual, Version 2.18.0, http://mc-stan.org, Stan Development Team, 2018.

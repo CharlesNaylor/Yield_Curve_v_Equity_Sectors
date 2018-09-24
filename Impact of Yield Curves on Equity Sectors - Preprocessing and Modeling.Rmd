@@ -68,7 +68,14 @@ yc %>%#this is faster than moving from long-to-wide, subtracting the column, the
 
 We can see that it is highly unusual for the long end of the yield curve to be inverted. It is *not* unusual for the short end of the curve to contain "kinks", in which the 3 or 6 month rates are higher than the 1, 2, or even 5 year rates, before the time-value of money supercedes expectations of future conditions.
 
-We propose to characterize the Yield Curve in any given period as sequence of four spreads. We could fit a cubix spline model to admit early kinks inside a generally positive-sloping curve, but the coefficients of that fit would not be directly interpretable. By choosing several spreads, we will need to account for collinearity in any predictive regressions.
+We propose to characterize the Yield Curve in any given period as sequence of four spreads:
+
+* Min: 6 months minus the average of 1M and 3M
+* Early: 12M minus 3M
+* Mid: 5Y - 1Y
+* Late: average of 10Y, 20Y, and 30Y minus 2Y
+
+We could fit a cubic spline model to admit early kinks inside a generally positive-sloping curve, but the coefficients of that fit would not be directly interpretable. By choosing several spreads, we will need to account for collinearity in any predictive regressions.
 
 ```{r yc}
 yc %>%
@@ -259,11 +266,11 @@ fit_rq %>%
   ggtitle("Sector Coefficients by Yield Change Quantile")
 ```
 
-We can see a clear sensitivity to tail values for the mid-level (10Y - 2Y) changes in the yield curve, at least for some sectors. Coefficients in this model are swamped by the intercept, which is two orders of magnitude more important than the effects we're measuring. We generally do not expect that yield curve changes will be the primary drivers of equity returns, so perhaps this is not surprising.
+We can see a clear sensitivity to tail values for the mid-level (10Y - 1Y) changes in the yield curve, at least for some sectors. Coefficients in this model are swamped by the intercept, which is two orders of magnitude more important than the effects we're measuring. We generally do not expect that yield curve changes will be the primary drivers of equity returns, so perhaps this is not surprising.
 
 ## HMC Model Version 1: Full pooling, missing data imputation
 
-We have much more data for the mid curve factor than for the others. It would be a pity to throw that away. With a generative model, however, we can accomodate the ragged array. There are two options: either we draw the missing factor data from a distribution approximating the full extant data, or we fit a preliminary model regressing unknown portions of the yield curve against what data we do have, and fill missing periods on the basis of that fit. In the first case, we will have made the incorrect assumption that the yield curve changes are i.i.d with respect to time, and in the second, unless we are careful to account for the leptokurtic structure of the yield curve differentials, we will have imposed normality on the missing distributions. It's debateable, but I think the first option is more conservative. First, we'll need to fit a Student T distribution to the factors so we know what to work with.
+We have much more data for the mid curve factor than for the others. It would be a pity to throw that away. With a generative model, however, we can accommodate the ragged array. There are two options: either we draw the missing factor data from a distribution approximating the full extant data, or we fit a preliminary model regressing unknown portions of the yield curve against what data we do have, and fill missing periods on the basis of that fit. In the first case, we will have made the incorrect assumption that the yield curve changes are i.i.d with respect to time, and in the second, unless we are careful to account for the leptokurtic structure of the yield curve differentials, we will have imposed normality on the missing distributions. It's debateable, but I think the first option is more conservative. First, we'll need to fit a Student T distribution to the factors so we know what to work with.
 
 ```{stan output.var="yc_diff_model", eval=FALSE, include=TRUE}
 // Fit the change in yield curve spreads to a student t distribution
@@ -611,3 +618,11 @@ cor_matrices %>%
   facet_grid(row~col) +
   ggtitle("Estimated Coefficient Correlations")
 ```
+
+
+
+## Citations
+
+1. Kenneth R. French - Data Library, http://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html, Accessed 2018-09-10.
+2. Federal Reserve Economic Data, St. Louis Fed., https://fred.stlouisfed.org, Accessed 2018-09-10.
+3. Stan Modeling Language Users Guide and Reference Manual, Version 2.18.0, http://mc-stan.org, Stan Development Team, 2018.
